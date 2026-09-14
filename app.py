@@ -14,87 +14,126 @@ from google.genai import types
 st.set_page_config(page_title="Retailer Testing Automation Engine", layout="wide")
 st.title("🛒 Retailer Order & Inventory Testing Automation")
 
+# Directory for storing test plans
+TEST_PLANS_DIR = "test_plans"
+os.makedirs(TEST_PLANS_DIR, exist_ok=True)
+
 # Retrieve API Key safely
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("⚠️ GEMINI_API_KEY is missing from Secrets! Please configure it in Streamlit Cloud settings.")
     st.stop()
 
-# Clean API Key of any accidental whitespace or quotes
+# Clean API Key
 api_key = api_key.strip().strip('"').strip("'")
 client = genai.Client(api_key=api_key)
 
-# Scope of Retailers
-RETAILERS_SCOPE = [
-    "Belk US Dropship", "Best Buy US Dropship", "BJ's US Wholesale Dropship",
-    "Costco CA Dropship", "Costco US Dropship", "Home Depot US Dropship",
-    "Home Depot CA Dropship", "JCPenney US Dropship", "Lowe's US Dropship",
-    "Lowe's CA Dropship", "Macy's US Dropship", "QVC US Dropship",
-    "Staples US Dropship", "Staples Quill US Dropship", "Staples Advantage US Dropship",
-    "Staples CA Dropship"
-]
+# Function to get available test plans from the local directory
+def get_available_test_plans():
+    files = [f for f in os.listdir(TEST_PLANS_DIR) if f.endswith(".pdf")]
+    # Standardize display names from filenames (e.g., Best_Buy_US_Dropship.pdf -> Best Buy US Dropship)
+    return sorted(files)
 
 # Sidebar Configurations
 st.sidebar.header("Test Configuration")
-selected_retailer = st.sidebar.selectbox("Select Target Retailer Scope", RETAILERS_SCOPE)
+
+# Get list of existing PDF files in `./test_plans/`
+available_files = get_available_test_plans()
+
+if not available_files:
+    st.sidebar.warning("⚠️ No test plans found in `./test_plans/`. Please upload one below.")
+    selected_file = None
+else:
+    selected_file = st.sidebar.selectbox(
+        "Select Target Retailer Test Plan",
+        available_files,
+        format_func=lambda x: x.replace(".pdf", "").replace("_", " ")
+    )
+
 override_tracking = st.sidebar.text_input("Tracking Number Override", value="1Z0000000000000000")
 
-# Input File Uploaders
-col_up1, col_up2 = st.columns(2)
-with col_up1:
-    order_pdf_file = st.file_uploader("1. Upload Order Screenshot PDF", type=["pdf"])
-with col_up2:
-    testplan_pdf_file = st.file_uploader("2. Upload Retailer Test Plan PDF", type=["pdf"])
-
-def pdf_to_image_bytes(pdf_bytes):
-    """Converts page 1 of PDF to PNG Bytes (most reliable format for GenAI API)."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc[0]
-    pix = page.get_pixmap(dpi=200)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+# ➕ UI Section: Add / Upload New Retailer Test Plan
+with st.sidebar.expander("➕ Add New Retailer Test Plan"):
+    new_retailer_name = st.text_input("Retailer Name (e.g., Target US Dropship)")
+    uploaded_plan_pdf = st.file_uploader("Upload Test Plan PDF", type=["pdf"], key="new_plan_uploader")
     
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    return img_byte_arr.getvalue()
+    if st.button("Save Test Plan"):
+        if new_retailer_name and uploaded_plan_pdf:
+            # Format filename safely
+            formatted_name = new_retailer_name.strip().replace(" ", "_") + ".pdf"
+            save_path = os.path.join(TEST_PLANS_DIR, formatted_name)
+            
+            with open(save_path, "wb") as f:
+                f.write(uploaded_plan_pdf.getvalue())
+            
+            st.success(f"✅ Saved `{formatted_name}`! Refreshing menu...")
+            st.rerun()
+        else:
+            st.error("Please provide both a name and a PDF file.")
+
+# Main Screen: Single File Uploader for Order Screenshot
+st.markdown("### Step 1: Upload Order Screenshot")
+order_pdf_file = st.file_uploader("Upload Order Screenshot PDF", type=["pdf"])
+
+def pdf_to_all_page_parts(pdf_bytes, label="Doc"):
+    """Converts ALL pages of a PDF into image Parts for Gemini Vision."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    parts = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap(dpi=200)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        
+        part = types.Part.from_bytes(
+            data=img_byte_arr.getvalue(), 
+            mime_type="image/png"
+        )
+        parts.append(part)
+    return parts
 
 def get_est_date():
     """Returns current date in Eastern Standard Time (EST/EDT)."""
     est = pytz.timezone('America/New_York')
     return datetime.datetime.now(est).strftime("%Y-%m-%d")
 
-if order_pdf_file and testplan_pdf_file:
+# Processing Block
+if order_pdf_file and selected_file:
     if st.button("⚡ Run Automation Engine"):
-        with st.spinner("Analyzing Order Screenshot & Test Plan PDFs..."):
+        with st.spinner("Analyzing Order Screenshot against Selected Retailer Test Plan..."):
             try:
-                # Convert PDFs to PNG bytes
-                order_img_bytes = pdf_to_image_bytes(order_pdf_file.getvalue())
-                testplan_img_bytes = pdf_to_image_bytes(testplan_pdf_file.getvalue())
+                # Read selected preloaded test plan PDF from disk
+                testplan_path = os.path.join(TEST_PLANS_DIR, selected_file)
+                with open(testplan_path, "rb") as f:
+                    testplan_bytes = f.read()
 
-                # Prepare inline data parts
-                part_order = types.Part.from_bytes(data=order_img_bytes, mime_type="image/png")
-                part_testplan = types.Part.from_bytes(data=testplan_img_bytes, mime_type="image/png")
+                # Convert pages to image parts
+                order_parts = pdf_to_all_page_parts(order_pdf_file.getvalue(), label="Order")
+                testplan_parts = pdf_to_all_page_parts(testplan_bytes, label="TestPlan")
+
+                retailer_display_name = selected_file.replace(".pdf", "").replace("_", " ")
 
                 prompt = f"""
                 You are an expert retail order testing parser.
-                Image 1 is an Order Screenshot PDF containing Purchase Orders (POs), Vendor SKUs, Ship-To Names, and Order Quantities.
-                Image 2 is a Retailer Test Plan PDF containing test case instructions, shipping scenarios, and cancellation requirements.
+                The provided images consist of:
+                1. Order Screenshot PDF pages containing Purchase Orders (POs), Vendor SKUs, Ship-To Names, and Order Quantities.
+                2. Retailer Test Plan PDF pages containing test case instructions, expected ship quantities, and cancellation requirements.
 
-                Target Retailer: {selected_retailer}
+                Target Retailer Scope: {retailer_display_name}
 
-                Instructions:
-                1. Extract all line items from Image 1 (Order Screenshot):
-                   - po_number
-                   - vendor_sku
-                   - ship_to_name
-                   - order_quantity
+                Task & Matching Rules:
+                1. Read every page of the Order Screenshot to capture ALL PO line items.
+                2. Match each line item to the Retailer Test Plan using the 'Ship-To Name', SKU, or Test Scenario sequence.
+                3. Calculate the exact:
+                   - ship_quantity: How many units to fulfill/ship according to the test plan instructions.
+                   - cancel_quantity: How many units to cancel according to the test plan instructions.
                 
-                2. Cross-reference each extracted order line with Image 2 (Retailer Test Plan) by matching the 'ship_to_name' and line item details.
-                
-                3. Determine:
-                   - ship_quantity: The quantity to ship based on the Test Plan instructions.
-                   - cancel_quantity: The quantity to cancel based on the Test Plan instructions.
+                If a test plan mandates a full cancellation, ship_quantity should be 0 and cancel_quantity equal to the ordered quantity.
+                If partial shipping is mandated, split the quantities accordingly.
 
-                Return ONLY a valid JSON array matching this structure:
+                Return ONLY a valid JSON array matching this exact schema:
                 [
                   {{
                     "po_number": "PO12345",
@@ -107,10 +146,15 @@ if order_pdf_file and testplan_pdf_file:
                 ]
                 """
 
-                # Send request using strict Part objects
+                # Combine payload
+                contents_payload = []
+                contents_payload.extend(order_parts)
+                contents_payload.extend(testplan_parts)
+                contents_payload.append(prompt)
+
                 response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=[part_order, part_testplan, prompt],
+                    model='gemini-2.5-flash',
+                    contents=contents_payload,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
                     )
@@ -119,7 +163,7 @@ if order_pdf_file and testplan_pdf_file:
                 processed_data = json.loads(response.text)
 
             except Exception as err:
-                st.error(f"❌ API Error Details: {err}")
+                st.error(f"❌ Automation Processing Error: {err}")
                 st.stop()
 
         st.subheader("Extracted & Matched Data Preview")
@@ -160,12 +204,13 @@ if order_pdf_file and testplan_pdf_file:
                     "Shipping Class Code": "Ground"
                 })
 
-            # 3. Cancellation
+            # 3. Cancellation (Reason Code set to 1)
             if cancel_qty > 0:
                 cancellation_rows.append({
                     "Invoice ID": po_num,
                     "SKU": sku,
                     "Quantity": cancel_qty,
+                    "Cancel Reason Code": 1,
                     "Adjustment": 0
                 })
 
@@ -208,3 +253,5 @@ if order_pdf_file and testplan_pdf_file:
                 "Cancellation_Template.csv",
                 "text/csv"
             )
+elif not selected_file:
+    st.info("💡 Please upload or add a retailer test plan to get started.")
