@@ -109,7 +109,7 @@ if order_pdf_file and testplan_pdf_file:
 
                 # Send request using strict Part objects
                 response = client.models.generate_content(
-                    model='gemini-3.5-flash',
+                    model='gemini-3.6-flash',
                     contents=[part_order, part_testplan, prompt],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
