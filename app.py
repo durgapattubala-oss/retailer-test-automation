@@ -28,16 +28,14 @@ if not api_key:
 api_key = api_key.strip().strip('"').strip("'")
 client = genai.Client(api_key=api_key)
 
-# Function to get available test plans from the local directory
+# Function to get available test plans from local directory
 def get_available_test_plans():
     files = [f for f in os.listdir(TEST_PLANS_DIR) if f.endswith(".pdf")]
-    # Standardize display names from filenames (e.g., Best_Buy_US_Dropship.pdf -> Best Buy US Dropship)
     return sorted(files)
 
 # Sidebar Configurations
 st.sidebar.header("Test Configuration")
 
-# Get list of existing PDF files in `./test_plans/`
 available_files = get_available_test_plans()
 
 if not available_files:
@@ -59,7 +57,6 @@ with st.sidebar.expander("➕ Add New Retailer Test Plan"):
     
     if st.button("Save Test Plan"):
         if new_retailer_name and uploaded_plan_pdf:
-            # Format filename safely
             formatted_name = new_retailer_name.strip().replace(" ", "_") + ".pdf"
             save_path = os.path.join(TEST_PLANS_DIR, formatted_name)
             
@@ -99,17 +96,15 @@ def get_est_date():
     est = pytz.timezone('America/New_York')
     return datetime.datetime.now(est).strftime("%Y-%m-%d")
 
-# Processing Block
+# Process button triggers processing and caches data in session_state
 if order_pdf_file and selected_file:
     if st.button("⚡ Run Automation Engine"):
         with st.spinner("Analyzing Order Screenshot against Selected Retailer Test Plan..."):
             try:
-                # Read selected preloaded test plan PDF from disk
                 testplan_path = os.path.join(TEST_PLANS_DIR, selected_file)
                 with open(testplan_path, "rb") as f:
                     testplan_bytes = f.read()
 
-                # Convert pages to image parts
                 order_parts = pdf_to_all_page_parts(order_pdf_file.getvalue(), label="Order")
                 testplan_parts = pdf_to_all_page_parts(testplan_bytes, label="TestPlan")
 
@@ -146,14 +141,13 @@ if order_pdf_file and selected_file:
                 ]
                 """
 
-                # Combine payload
                 contents_payload = []
                 contents_payload.extend(order_parts)
                 contents_payload.extend(testplan_parts)
                 contents_payload.append(prompt)
 
                 response = client.models.generate_content(
-                    model='gemini-3.6-flash',
+                    model='gemini-2.5-flash',
                     contents=contents_payload,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
@@ -162,96 +156,99 @@ if order_pdf_file and selected_file:
 
                 processed_data = json.loads(response.text)
 
+                # Generate DataFrames
+                product_rows = []
+                tracking_rows = []
+                cancellation_rows = []
+                
+                current_est_date = get_est_date()
+                unique_skus = set()
+
+                for row in processed_data:
+                    po_num = str(row.get("po_number", "")).strip()
+                    sku = str(row.get("vendor_sku", "")).strip()
+                    ship_qty = int(row.get("ship_quantity", 0))
+                    cancel_qty = int(row.get("cancel_quantity", 0))
+
+                    if sku not in unique_skus:
+                        unique_skus.add(sku)
+                        product_rows.append({
+                            "SKU": sku,
+                            "Quantity": 50,
+                            "Quantity Update Type": "Absolute"
+                        })
+
+                    if ship_qty > 0:
+                        tracking_rows.append({
+                            "Invoice Number": po_num,
+                            "SKU": sku,
+                            "Tracking Number": override_tracking,
+                            "Quantity": ship_qty,
+                            "Date Shipped": current_est_date,
+                            "Shipping Carrier Code": "UPS",
+                            "Shipping Class Code": "Ground"
+                        })
+
+                    if cancel_qty > 0:
+                        cancellation_rows.append({
+                            "Invoice ID": po_num,
+                            "SKU": sku,
+                            "Quantity": cancel_qty,
+                            "Cancel Reason Code": 1,
+                            "Adjustment": 0
+                        })
+
+                # Save everything in session state so downloads don't wipe memory
+                st.session_state["processed_data"] = processed_data
+                st.session_state["df_product_out"] = pd.DataFrame(product_rows)
+                st.session_state["df_tracking_out"] = pd.DataFrame(tracking_rows)
+                st.session_state["df_cancel_out"] = pd.DataFrame(cancellation_rows)
+
             except Exception as err:
                 st.error(f"❌ Automation Processing Error: {err}")
                 st.stop()
 
-        st.subheader("Extracted & Matched Data Preview")
-        st.dataframe(pd.DataFrame(processed_data), use_container_width=True)
+# Render cached results if available in session_state
+if "processed_data" in st.session_state:
+    st.subheader("Extracted & Matched Data Preview")
+    st.dataframe(pd.DataFrame(st.session_state["processed_data"]), use_container_width=True)
 
-        # Build Output Templates
-        product_rows = []
-        tracking_rows = []
-        cancellation_rows = []
-        
-        current_est_date = get_est_date()
-        unique_skus = set()
+    st.markdown("---")
+    st.header("Generated Output Templates")
+    
+    col_out1, col_out2, col_out3 = st.columns(3)
+    
+    with col_out1:
+        st.subheader("1. Product Upload")
+        st.dataframe(st.session_state["df_product_out"], use_container_width=True)
+        st.download_button(
+            "📥 Download Product CSV",
+            st.session_state["df_product_out"].to_csv(index=False).encode('utf-8'),
+            "Product_Upload_Template.csv",
+            "text/csv",
+            key="btn_product_download"
+        )
 
-        for row in processed_data:
-            po_num = str(row.get("po_number", "")).strip()
-            sku = str(row.get("vendor_sku", "")).strip()
-            ship_qty = int(row.get("ship_quantity", 0))
-            cancel_qty = int(row.get("cancel_quantity", 0))
+    with col_out2:
+        st.subheader("2. Shipping Tracking")
+        st.dataframe(st.session_state["df_tracking_out"], use_container_width=True)
+        st.download_button(
+            "📥 Download Tracking CSV",
+            st.session_state["df_tracking_out"].to_csv(index=False).encode('utf-8'),
+            "Shipping_Tracking_Template.csv",
+            "text/csv",
+            key="btn_tracking_download"
+        )
 
-            # 1. Product Upload
-            if sku not in unique_skus:
-                unique_skus.add(sku)
-                product_rows.append({
-                    "SKU": sku,
-                    "Quantity": 50,
-                    "Quantity Update Type": "Absolute"
-                })
-
-            # 2. Shipping Tracking
-            if ship_qty > 0:
-                tracking_rows.append({
-                    "Invoice Number": po_num,
-                    "SKU": sku,
-                    "Tracking Number": override_tracking,
-                    "Quantity": ship_qty,
-                    "Date Shipped": current_est_date,
-                    "Shipping Carrier Code": "UPS",
-                    "Shipping Class Code": "Ground"
-                })
-
-            # 3. Cancellation (Reason Code set to 1)
-            if cancel_qty > 0:
-                cancellation_rows.append({
-                    "Invoice ID": po_num,
-                    "SKU": sku,
-                    "Quantity": cancel_qty,
-                    "Cancel Reason Code": 1,
-                    "Adjustment": 0
-                })
-
-        df_product_out = pd.DataFrame(product_rows)
-        df_tracking_out = pd.DataFrame(tracking_rows)
-        df_cancel_out = pd.DataFrame(cancellation_rows)
-
-        # UI Deliverables
-        st.markdown("---")
-        st.header("Generated Output Templates")
-        
-        col_out1, col_out2, col_out3 = st.columns(3)
-        
-        with col_out1:
-            st.subheader("1. Product Upload")
-            st.dataframe(df_product_out, use_container_width=True)
-            st.download_button(
-                "📥 Download Product CSV",
-                df_product_out.to_csv(index=False).encode('utf-8'),
-                "Product_Upload_Template.csv",
-                "text/csv"
-            )
-
-        with col_out2:
-            st.subheader("2. Shipping Tracking")
-            st.dataframe(df_tracking_out, use_container_width=True)
-            st.download_button(
-                "📥 Download Tracking CSV",
-                df_tracking_out.to_csv(index=False).encode('utf-8'),
-                "Shipping_Tracking_Template.csv",
-                "text/csv"
-            )
-
-        with col_out3:
-            st.subheader("3. Cancellation")
-            st.dataframe(df_cancel_out, use_container_width=True)
-            st.download_button(
-                "📥 Download Cancellation CSV",
-                df_cancel_out.to_csv(index=False).encode('utf-8'),
-                "Cancellation_Template.csv",
-                "text/csv"
-            )
+    with col_out3:
+        st.subheader("3. Cancellation")
+        st.dataframe(st.session_state["df_cancel_out"], use_container_width=True)
+        st.download_button(
+            "📥 Download Cancellation CSV",
+            st.session_state["df_cancel_out"].to_csv(index=False).encode('utf-8'),
+            "Cancellation_Template.csv",
+            "text/csv",
+            key="btn_cancel_download"
+        )
 elif not selected_file:
     st.info("💡 Please upload or add a retailer test plan to get started.")
