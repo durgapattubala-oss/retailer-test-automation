@@ -13,10 +13,16 @@ from google.genai import types
 st.set_page_config(page_title="Retailer Testing Automation Engine", layout="wide")
 st.title("🛒 Retailer Order & Inventory Testing Automation")
 
-# Initialize Gemini Client
-client = genai.Client()
+# Retrieve API Key explicitly from Streamlit Secrets
+api_key = st.secrets.get("GEMINI_API_KEY")
+if not api_key:
+    st.error("⚠️ GEMINI_API_KEY is missing from Secrets! Please configure it in your Streamlit Cloud settings.")
+    st.stop()
 
-# Retailer List Scope
+# Initialize Gemini Client with your key
+client = genai.Client(api_key=api_key)
+
+# Retailer Scope List
 RETAILERS_SCOPE = [
     "Belk US Dropship", "Best Buy US Dropship", "BJ's US Wholesale Dropship",
     "Costco CA Dropship", "Costco US Dropship", "Home Depot US Dropship",
@@ -39,7 +45,7 @@ with col_up2:
     testplan_pdf_file = st.file_uploader("2. Upload Retailer Test Plan PDF", type=["pdf"])
 
 def pdf_to_image(pdf_bytes):
-    """Converts the first page of a PDF file to a PIL Image."""
+    """Converts page 1 of uploaded PDF into a PIL Image for Gemini Vision."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc[0]
     pix = page.get_pixmap(dpi=200)
@@ -54,11 +60,11 @@ if order_pdf_file and testplan_pdf_file:
     if st.button("⚡ Run Automation Engine"):
         with st.spinner("Analyzing Order Screenshot & Test Plan PDFs..."):
             
-            # Convert both PDFs to images
-            order_img = pdf_to_image(order_pdf_file.read())
-            testplan_img = pdf_to_image(testplan_pdf_file.read())
+            # Convert PDF streams into images
+            order_img = pdf_to_image(order_pdf_file.getvalue())
+            testplan_img = pdf_to_image(testplan_pdf_file.getvalue())
 
-            # Prompt to cross-reference both images directly
+            # Gemini Prompt
             prompt = f"""
             You are an expert retail order testing parser.
             Image 1 is an Order Screenshot PDF containing Purchase Orders (POs), Vendor SKUs, Ship-To Names, and Order Quantities.
@@ -109,7 +115,7 @@ if order_pdf_file and testplan_pdf_file:
         st.subheader("Extracted & Matched Data Preview")
         st.dataframe(pd.DataFrame(processed_data), use_container_width=True)
 
-        # Build final tables per requirements
+        # Build Output Templates
         product_rows = []
         tracking_rows = []
         cancellation_rows = []
@@ -123,7 +129,7 @@ if order_pdf_file and testplan_pdf_file:
             ship_qty = int(row.get("ship_quantity", 0))
             cancel_qty = int(row.get("cancel_quantity", 0))
 
-            # 1. Product Upload File
+            # 1. Product Upload Template
             if sku not in unique_skus:
                 unique_skus.add(sku)
                 product_rows.append({
@@ -132,7 +138,7 @@ if order_pdf_file and testplan_pdf_file:
                     "Quantity Update Type": "Absolute"
                 })
 
-            # 2. Shipping Tracking File
+            # 2. Shipping Tracking Template
             if ship_qty > 0:
                 tracking_rows.append({
                     "Invoice Number": po_num,
@@ -144,7 +150,7 @@ if order_pdf_file and testplan_pdf_file:
                     "Shipping Class Code": "Ground"
                 })
 
-            # 3. Cancellation File
+            # 3. Cancellation Template
             if cancel_qty > 0:
                 cancellation_rows.append({
                     "Invoice ID": po_num,
@@ -157,7 +163,7 @@ if order_pdf_file and testplan_pdf_file:
         df_tracking_out = pd.DataFrame(tracking_rows)
         df_cancel_out = pd.DataFrame(cancellation_rows)
 
-        # UI Deliverables
+        # UI Downloads
         st.markdown("---")
         st.header("Generated Output Templates")
         
