@@ -50,7 +50,7 @@ else:
 
 override_tracking = st.sidebar.text_input("Tracking Number Override", value="1Z0000000000000000")
 
-# ➕ UI Section: Add / Upload New Retailer Test Plan
+# UI Section: Add / Upload New Retailer Test Plan
 with st.sidebar.expander("➕ Add New Retailer Test Plan"):
     new_retailer_name = st.text_input("Retailer Name (e.g., Target US Dropship)")
     uploaded_plan_pdf = st.file_uploader("Upload Test Plan PDF", type=["pdf"], key="new_plan_uploader")
@@ -112,21 +112,20 @@ if order_pdf_file and selected_file:
 
                 prompt = f"""
                 You are an expert retail order testing parser.
-                The provided images consist of:
-                1. Order Screenshot PDF pages containing Purchase Orders (POs), Vendor SKUs, Ship-To Names, and Order Quantities.
-                2. Retailer Test Plan PDF pages containing test case instructions, expected ship quantities, and cancellation requirements.
+                
+                Input Data Context:
+                1. Order Screenshot PDF pages: Contains actual Purchase Order numbers (POs), SKUs, Ship-To Customer details, and original Ordered Quantities.
+                2. Retailer Test Plan PDF pages: The SINGLE SOURCE OF TRUTH for testing logic. Dictates exact test case scenarios (e.g., Full Ship, Partial Ship, Full Cancel).
 
                 Target Retailer Scope: {retailer_display_name}
 
-                Task & Matching Rules:
-                1. Read every page of the Order Screenshot to capture ALL PO line items.
-                2. Match each line item to the Retailer Test Plan using the 'Ship-To Name', SKU, or Test Scenario sequence.
-                3. Calculate the exact:
-                   - ship_quantity: How many units to fulfill/ship according to the test plan instructions.
-                   - cancel_quantity: How many units to cancel according to the test plan instructions.
-                
-                If a test plan mandates a full cancellation, ship_quantity should be 0 and cancel_quantity equal to the ordered quantity.
-                If partial shipping is mandated, split the quantities accordingly.
+                Core Rules:
+                1. Match each line item from the Order Screenshot to the corresponding Test Case in the Test Plan PDF using Ship-To Name, SKU, or Test Scenario sequence.
+                2. Determine `ship_quantity` and `cancel_quantity` strictly based on the Test Plan instructions:
+                   - Full Ship scenario: ship_quantity = order_quantity, cancel_quantity = 0
+                   - Full Cancel scenario: ship_quantity = 0, cancel_quantity = order_quantity
+                   - Partial Ship scenario: split order_quantity based on the test plan instructions.
+                3. Treat each PO line item distinctly.
 
                 Return ONLY a valid JSON array matching this exact schema:
                 [
@@ -170,7 +169,8 @@ if order_pdf_file and selected_file:
                     ship_qty = int(row.get("ship_quantity", 0))
                     cancel_qty = int(row.get("cancel_quantity", 0))
 
-                    if sku not in unique_skus:
+                    # Product upload template (unique SKUs only)
+                    if sku and sku not in unique_skus:
                         unique_skus.add(sku)
                         product_rows.append({
                             "SKU": sku,
@@ -178,6 +178,7 @@ if order_pdf_file and selected_file:
                             "Quantity Update Type": "Absolute"
                         })
 
+                    # Tracking template (Only rows with quantities to ship)
                     if ship_qty > 0:
                         tracking_rows.append({
                             "Invoice Number": po_num,
@@ -189,6 +190,7 @@ if order_pdf_file and selected_file:
                             "Shipping Class Code": "Ground"
                         })
 
+                    # Cancellation template (Only rows with quantities to cancel)
                     if cancel_qty > 0:
                         cancellation_rows.append({
                             "Invoice ID": po_num,
@@ -198,7 +200,7 @@ if order_pdf_file and selected_file:
                             "Adjustment": 0
                         })
 
-                # Save everything in session state so downloads don't wipe memory
+                # Save clean DataFrames into session state
                 st.session_state["processed_data"] = processed_data
                 st.session_state["df_product_out"] = pd.DataFrame(product_rows)
                 st.session_state["df_tracking_out"] = pd.DataFrame(tracking_rows)
